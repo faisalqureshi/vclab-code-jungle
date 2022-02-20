@@ -1,3 +1,6 @@
+# Faisal Qureshi  
+# faisal.qureshi@ontariotechu.ca
+
 import sys
 sys.path.append('../')
 
@@ -7,8 +10,9 @@ import torch
 import model
 import positional_encoding as pe
 
-def reconstruct_image(model):
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+def reconstruct_image(model, device=None):
+    if device == None:
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device}')
     model.to(device)
 
@@ -30,8 +34,9 @@ def reconstruct_image(model):
     
     return output_image
 
-def resample_image(model, new_h, new_w):
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+def resample_image(model, new_h, new_w, device=None):
+    if device == None:
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
     print(f'Using {device}')
     model.to(device)
 

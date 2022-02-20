@@ -1,3 +1,6 @@
+# Faisal Qureshi  
+# faisal.qureshi@ontariotechu.ca
+
 import sys
 import numpy as np
 import torchvision as tv

@@ -1,3 +1,6 @@
+# Faisal Qureshi  
+# faisal.qureshi@ontariotechu.ca
+
 import sys
 sys.path.append('../')
 
