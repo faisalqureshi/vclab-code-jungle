@@ -1,6 +1,7 @@
 # Faisal Qureshi     
 # faisal.qureshi@ontariotechu.ca
 
+from re import I
 import torch
 from PIL import Image
 import argparse
@@ -9,19 +10,31 @@ import matplotlib.pyplot as plt
 import torchvision as tv
 from torch.utils.tensorboard import SummaryWriter
 
+device = 'cpu'
+
 image_folder = '../../data/imagecompression.info/rgb8bit'
 image_input = os.path.join(image_folder, 'deer-small.ppm')
 image_output = os.path.join(image_folder, 'deer-small-enhanced.ppm')
 
-def show_images(im1, im2):
+def show_images(im1, im2, im3, delay=-1):
+    """
+    Uses matplotlib to show two images next to each other.
+    """
     plt.figure()
-    plt.subplot(1,2,1)
-    plt.title('original')
+    plt.subplot(1,3,1)
+    plt.title('input')
     plt.imshow(im1)
-    plt.subplot(1,2,2)
-    plt.title('enhanced')
+    plt.subplot(1,3,2)
+    plt.title('network')
     plt.imshow(im2)
-    plt.show()
+    plt.subplot(1,3,3)
+    plt.title('corrected')
+    plt.imshow(im3)
+
+    if delay > 0:
+        plt.pause(delay)
+    else:
+        plt.show()
 
 import einops
 def lift(im):
@@ -63,15 +76,19 @@ class HyperNet(torch.nn.Module):
     def __init__(self):
         super(HyperNet, self).__init__()
         self.backbone = tv.models.resnet18(pretrained=True)
-        for p in self.backbone.parameters():
-            p.requires_grad = False
+        # for p in self.backbone.parameters():
+        #     p.requires_grad = False
         
         in_ftrs = self.backbone.fc.in_features
-        self.backbone.fc = torch.nn.Linear(in_ftrs, 30, bias=False)
+        self.backbone.fc = torch.nn.Linear(in_ftrs, 64)
+        self.linear = torch.nn.Linear(64, 30, bias=False)
+        self.ctx = None
 
-    def forward(self, ctx):
-        x = self.backbone(ctx)
-        return x
+    def forward(self):
+        x = self.backbone(self.ctx)
+        x = torch.nn.functional.relu(x)
+        x = self.linear(x)
+        return x.view(3,10)
 
 class PrimaryNet(torch.nn.Module):
     """
@@ -81,19 +98,17 @@ class PrimaryNet(torch.nn.Module):
 
     def __init__(self):
         super(PrimaryNet, self).__init__()
-        self.linear = torch.nn.Linear(10, 3, bias=False)
         self.hyper_network = HyperNet()
 
     def forward(self, x):
-        weights = self.hyper_network(x['ctx'])
-        self.linear.weight = torch.nn.Parameter(weights.view(3,10))
-        self.linear.weight.requires_grad = False
-        x = self.linear(x['data'])
+        w = self.hyper_network()
+        x = torch.nn.functional.linear(x, w)
         return x
 
 def train(num_epochs, verbose, resume):
     print(f'Reading {image_input}')
     im_in = Image.open(image_input)
+    print(im_in.size)
     print(f'Reading {image_output}')    
     im_out = Image.open(image_output)
 
@@ -101,10 +116,20 @@ def train(num_epochs, verbose, resume):
     dataset = PixData(im_in, im_out)
     training_dataloader = tdata.DataLoader(dataset, batch_size=512, shuffle=True)
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    print(f'Using {device}')
-
     net = PrimaryNet()
+
+    # load previously saved checkpoint if resuming otherwise start anew
+    if resume:
+        ckpt = torch.load('./hyper1.pth')
+        net.load_state_dict(ckpt['net'])
+        loss_best = ckpt['loss']
+        epochs_completed = ckpt['epochs_completed']
+
+        print('Resuming from saved checkpoint:')
+        print(f'  Epochs completed = {epochs_completed}, loss = {loss_best}')
+    else:
+        loss_best = -1
+        epochs_completed = 0
 
     # push model to computed device
     # set up loss and optimizer
@@ -121,14 +146,12 @@ def train(num_epochs, verbose, resume):
         epoch += 1
         loss_epoch = 0.0
         cnts = 0
-        for _, x in enumerate(training_dataloader):
-            inputs = {
-                'data': x['data'].to(device),
-                'ctx': dataset.ctx.to(device)
-            }
-            labels = x['out'].to(device)
+        for _, data in enumerate(training_dataloader):
+            inputs = data['data'].to(device)
+            labels = data['out'].to(device)
 
             optimizer.zero_grad()
+            net.hyper_network.ctx = dataset.ctx.to(device)
             outputs = net(inputs)    
             loss = loss_fn(outputs, labels)
             loss.backward()
@@ -154,37 +177,60 @@ def train(num_epochs, verbose, resume):
             )
             loss_best = loss_epoch
 
+    im_corrected = evaluate(net, im_in)
+    show_images(im_in, im_corrected, im_out)
+
+    return net
+
+def evaluate(net, im):
+        transforms_1 = tv.transforms.Compose([tv.transforms.ToTensor()])
+        input = lift(transforms_1(im))
+        input = einops.rearrange(input, 'h w -> () w h')
+        print(input.shape)
+        transforms_2 = tv.transforms.Compose([tv.transforms.Resize((224,224)), tv.transforms.ToTensor()])
+        ctx = einops.rearrange(transforms_2(im), 'c h w -> () c h w')
+        print(ctx.shape)
+        net.hyper_network.ctx = ctx.to(device)
+        output = net(input.to(device)).view(3, 334, 512)
+        print(output.shape)
+        return einops.rearrange(output.detach().cpu(), 'c h w -> h w c')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-r', '--resume', action='store_true', default=False, help='Resume training')
     parser.add_argument('-s', '--show', action='store_true', default=False, help='Show input and output images and exits')
-    parser.add_argument('--num_epochs', action='store', default=1, type=int, help='Number of epochs')
+    parser.add_argument('-e', '--num_epochs', action='store', default=1, type=int, help='Number of epochs')
     parser.add_argument('-v', '--verbose', action='store_true', default=False, help='Print loss at every epoch')
 
     args = parser.parse_args()
 
-    print(f'Reading {image_input}')
-    im_in = Image.open(image_input)
-    print(f'Reading {image_output}')    
-    im_out = Image.open(image_output)
+    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print(f'Using {device}')
 
-    if args.show:
-        show_images(im_in, im_out)
+    # print(f'Reading {image_input}')
+    # im_in = Image.open(image_input)
+    # print(f'Reading {image_output}')    
+    # im_out = Image.open(image_output)
 
-    print('Setting up dataset')
-    dataset = PixData(im_in, im_out)
-    print(len(dataset))
-    print(dataset[0])
-    print(dataset.ctx.shape)
+    # if args.show:
+    #     show_images(im_in, im_out)
 
-    print('Setting up HyperNet')
-    hyper_net = HyperNet()
-    hyper_net(dataset.ctx)
+    # print('Setting up dataset')
+    # dataset = PixData(im_in, im_out)
+    # print(len(dataset))
+    # print(dataset[0])
+    # print(dataset.ctx.shape)
 
-    print('Setting up PrimaryNet')
-    primary_net = PrimaryNet()
-    x = {'data': dataset[0]['data'].unsqueeze(0), 'ctx': dataset.ctx}
-    primary_net(x)
-    print(primary_net.state_dict())
+    # print('Setting up HyperNet')
+    # hyper_net = HyperNet()
+    # hyper_net(dataset.ctx)
+
+    # print('Setting up PrimaryNet')
+    # primary_net = PrimaryNet()
+    # x = {'data': dataset[0]['dataz):'].unsqueeze(0), 'ctx': dataset.ctx}
+    # primary_net(x)
+    # print(primary_net.state_dict())
     
-    train(num_epochs=args.num_epochs, verbose=args.verbose, resume=args.resume)
+    net = train(num_epochs=args.num_epochs, verbose=args.verbose, resume=args.resume)
+
+    
